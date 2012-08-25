@@ -1,4 +1,15 @@
-# README for a newly created project.
+# Project Basil
+
+##MVP
+- Hyper-simple data entry for a CSA share
+- Data sourced for typical lifetimes for specific foods
+- Present order of consumption, allow marking off as items are used
+
+##Backlog
+- Recommend recipes based on prioritized list of items
+
+
+# Project Setup Notes
 
 There are a couple of things you should do first, before you can use all of Git's power:
 
