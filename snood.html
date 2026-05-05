@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Snood</title>
+<style>
+  :root {
+    --bg: #1a1530;
+    --panel: #2a2350;
+    --ink: #f4f0ff;
+    --accent: #ffd166;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  .wrap {
+    display: flex;
+    gap: 16px;
+    padding: 16px;
+    align-items: flex-start;
+  }
+  .stage {
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+  }
+  canvas {
+    display: block;
+    border-radius: 8px;
+    background: #0e0a22;
+    cursor: crosshair;
+    image-rendering: -webkit-optimize-contrast;
+  }
+  .hud {
+    width: 200px;
+    background: var(--panel);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+  }
+  h1 { margin: 0 0 12px; font-size: 22px; letter-spacing: 1px; color: var(--accent); }
+  .row { display: flex; justify-content: space-between; margin: 6px 0; font-size: 14px; }
+  .row b { color: var(--accent); }
+  button {
+    background: var(--accent);
+    color: #1a1530;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-weight: 700;
+    cursor: pointer;
+    width: 100%;
+    margin-top: 12px;
+  }
+  button:hover { filter: brightness(1.05); }
+  .help { font-size: 12px; opacity: .8; margin-top: 12px; line-height: 1.4; }
+  .banner {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10,6,30,.75);
+    border-radius: 8px;
+    flex-direction: column;
+    pointer-events: none;
+  }
+  .banner.show { display: flex; }
+  .banner h2 { margin: 0; font-size: 36px; color: var(--accent); }
+  .banner p { margin: 6px 0 0; opacity: .85; }
+  .stagewrap { position: relative; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="stage">
+      <div class="stagewrap">
+        <canvas id="game" width="480" height="640"></canvas>
+        <div class="banner" id="banner">
+          <h2 id="bannerTitle">Game Over</h2>
+          <p id="bannerSub">Press New Game</p>
+        </div>
+      </div>
+    </div>
+    <div class="hud">
+      <h1>SNOOD</h1>
+      <div class="row"><span>Score</span><b id="score">0</b></div>
+      <div class="row"><span>Level</span><b id="level">1</b></div>
+      <div class="row"><span>Danger</span><b id="danger">0%</b></div>
+      <button id="newgame">New Game</button>
+      <button id="shareBtn" style="background:#9b8cff;color:#fff">Copy Share Link</button>
+      <div class="help">
+        Aim with the mouse, click to shoot. Bounce off the side walls.
+        Match 3+ of the same color to pop them. Disconnected snoods fall
+        and score extra. Don't let them reach the danger line!
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+
+  const R = 18;                       // snood radius
+  const COLS = 12;                    // grid columns (even rows)
+  const ROW_H = R * Math.sqrt(3);     // hex row height
+  const TOP_PAD = R + 4;
+  const DANGER_Y = H - 100;
+  const SHOOTER_Y = H - 40;
+  const SHOOTER_X = W / 2;
+
+  const COLORS = ['#ff5d6c', '#5dd6ff', '#ffd166', '#7bff9d', '#c79bff', '#ff9b6b'];
+
+  // grid: array of rows; each row is an array of cells (color string or null)
+  // even rows (0, 2, ...) have COLS cells, odd rows have COLS-1 cells (offset by R)
+  let grid = [];
+  let current = null;        // active snood color
+  let next = null;           // next snood color
+  let projectile = null;     // {x,y,vx,vy,color}
+  let aim = -Math.PI / 2;
+  let score = 0;
+  let level = 1;
+  let shotsBeforeDrop = 8;
+  let shotsTaken = 0;
+  let gridOffset = 0;        // how far the grid has descended in pixels
+  let gameOver = false;
+  let won = false;
+
+  const rowCols = (r) => (r % 2 === 0) ? COLS : COLS - 1;
+
+  function cellCenter(r, c) {
+    const offsetX = (r % 2 === 0) ? R : 2 * R;
+    const x = offsetX + c * (2 * R);
+    const y = TOP_PAD + r * ROW_H + gridOffset;
+    return { x, y };
+  }
+
+  function pixelToCell(x, y) {
+    const ry = (y - TOP_PAD - gridOffset) / ROW_H;
+    const r0 = Math.max(0, Math.round(ry));
+    let best = null;
+    for (let r = Math.max(0, r0 - 1); r <= r0 + 1; r++) {
+      for (let c = 0; c < rowCols(r); c++) {
+        const p = cellCenter(r, c);
+        const d2 = (p.x - x) ** 2 + (p.y - y) ** 2;
+        if (best == null || d2 < best.d2) best = { r, c, d2 };
+      }
+    }
+    return best;
+  }
+
+  function neighbors(r, c) {
+    // hex neighbors. Even rows: NW=(r-1,c-1), NE=(r-1,c), W=(r,c-1), E=(r,c+1), SW=(r+1,c-1), SE=(r+1,c)
+    // Odd rows:  NW=(r-1,c),   NE=(r-1,c+1), W=(r,c-1), E=(r,c+1), SW=(r+1,c),   SE=(r+1,c+1)
+    const out = [];
+    const even = (r % 2 === 0);
+    const deltas = even
+      ? [[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]]
+      : [[-1, 0],[-1,1],[0,-1],[0,1],[1, 0],[1,1]];
+    for (const [dr, dc] of deltas) {
+      const nr = r + dr, nc = c + dc;
+      if (nr < 0 || nr >= grid.length) continue;
+      if (nc < 0 || nc >= rowCols(nr)) continue;
+      out.push({ r: nr, c: nc });
+    }
+    return out;
+  }
+
+  function newGrid(rows) {
+    grid = [];
+    for (let r = 0; r < rows; r++) {
+      const row = [];
+      for (let c = 0; c < rowCols(r); c++) {
+        row.push(COLORS[Math.floor(Math.random() * activeColorCount())]);
+      }
+      grid.push(row);
+    }
+  }
+
+  function activeColorCount() {
+    return Math.min(COLORS.length, 4 + Math.floor(level / 3));
+  }
+
+  function pickColorFromBoard() {
+    const present = new Set();
+    for (const row of grid) for (const c of row) if (c) present.add(c);
+    const arr = [...present];
+    if (arr.length === 0) return COLORS[0];
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  function startGame() {
+    score = 0;
+    level = 1;
+    gridOffset = 0;
+    shotsTaken = 0;
+    gameOver = false;
+    won = false;
+    document.getElementById('banner').classList.remove('show');
+    newGrid(6);
+    current = pickColorFromBoard();
+    next = pickColorFromBoard();
+    projectile = null;
+    updateHud();
+  }
+
+  function nextLevel() {
+    level += 1;
+    gridOffset = 0;
+    shotsTaken = 0;
+    newGrid(6 + Math.min(4, Math.floor(level / 2)));
+    current = pickColorFromBoard();
+    next = pickColorFromBoard();
+    projectile = null;
+  }
+
+  function fire() {
+    if (projectile || gameOver) return;
+    const speed = 14;
+    projectile = {
+      x: SHOOTER_X,
+      y: SHOOTER_Y,
+      vx: Math.cos(aim) * speed,
+      vy: Math.sin(aim) * speed,
+      color: current
+    };
+    current = next;
+    next = pickColorFromBoard();
+  }
+
+  function snapProjectileToGrid() {
+    if (!projectile) return;
+    const cell = pixelToCell(projectile.x, projectile.y);
+    if (!cell) return;
+    let { r, c } = cell;
+    // walk to nearest empty cell adjacent to a filled one (or top edge)
+    if (grid[r] && grid[r][c]) {
+      // occupied — try neighbors
+      const nbrs = neighbors(r, c);
+      let best = null;
+      for (const n of nbrs) {
+        if (!grid[n.r] || grid[n.r][n.c]) continue;
+        const p = cellCenter(n.r, n.c);
+        const d2 = (p.x - projectile.x) ** 2 + (p.y - projectile.y) ** 2;
+        if (best == null || d2 < best.d2) best = { ...n, d2 };
+      }
+      if (best) { r = best.r; c = best.c; }
+    }
+    while (r >= grid.length) {
+      const newRow = [];
+      for (let i = 0; i < rowCols(grid.length); i++) newRow.push(null);
+      grid.push(newRow);
+    }
+    grid[r][c] = projectile.color;
+    projectile = null;
+
+    const popped = popMatches(r, c);
+    if (popped.length >= 3) {
+      score += popped.length * 10;
+      const fell = dropFloating();
+      score += fell * 25;
+    }
+
+    if (grid.every(row => row.every(c => !c))) {
+      won = true;
+      score += 500;
+      setTimeout(nextLevel, 600);
+    } else {
+      shotsTaken += 1;
+      if (shotsTaken >= shotsBeforeDrop) {
+        shotsTaken = 0;
+        gridOffset += ROW_H * 0.5;
+      }
+      checkLose();
+    }
+    updateHud();
+  }
+
+  function popMatches(r, c) {
+    const color = grid[r][c];
+    if (!color) return [];
+    const stack = [{ r, c }];
+    const seen = new Set();
+    const matches = [];
+    const key = (r, c) => r + ',' + c;
+    while (stack.length) {
+      const cur = stack.pop();
+      const k = key(cur.r, cur.c);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      if (!grid[cur.r] || grid[cur.r][cur.c] !== color) continue;
+      matches.push(cur);
+      for (const n of neighbors(cur.r, cur.c)) {
+        if (!seen.has(key(n.r, n.c))) stack.push(n);
+      }
+    }
+    if (matches.length >= 3) {
+      for (const m of matches) grid[m.r][m.c] = null;
+      return matches;
+    }
+    return [];
+  }
+
+  function dropFloating() {
+    // BFS from the top row; everything not reachable falls.
+    const reachable = new Set();
+    const queue = [];
+    const key = (r, c) => r + ',' + c;
+    for (let c = 0; c < rowCols(0); c++) {
+      if (grid[0] && grid[0][c]) {
+        queue.push({ r: 0, c });
+        reachable.add(key(0, c));
+      }
+    }
+    while (queue.length) {
+      const cur = queue.shift();
+      for (const n of neighbors(cur.r, cur.c)) {
+        const k = key(n.r, n.c);
+        if (reachable.has(k)) continue;
+        if (grid[n.r] && grid[n.r][n.c]) {
+          reachable.add(k);
+          queue.push(n);
+        }
+      }
+    }
+    let dropped = 0;
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (grid[r][c] && !reachable.has(key(r, c))) {
+          grid[r][c] = null;
+          dropped += 1;
+        }
+      }
+    }
+    return dropped;
+  }
+
+  function checkLose() {
+    for (let r = grid.length - 1; r >= 0; r--) {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (grid[r][c]) {
+          const p = cellCenter(r, c);
+          if (p.y + R >= DANGER_Y) {
+            gameOver = true;
+            const b = document.getElementById('banner');
+            b.classList.add('show');
+            document.getElementById('bannerTitle').textContent = 'Game Over';
+            document.getElementById('bannerSub').textContent = 'Score: ' + score;
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  function step() {
+    if (projectile) {
+      projectile.x += projectile.vx;
+      projectile.y += projectile.vy;
+      if (projectile.x < R) { projectile.x = R; projectile.vx *= -1; }
+      if (projectile.x > W - R) { projectile.x = W - R; projectile.vx *= -1; }
+      if (projectile.y < R) {
+        snapProjectileToGrid();
+      } else {
+        // collide with grid
+        for (let r = 0; r < grid.length; r++) {
+          for (let c = 0; c < grid[r].length; c++) {
+            if (!grid[r][c]) continue;
+            const p = cellCenter(r, c);
+            const dx = p.x - projectile.x;
+            const dy = p.y - projectile.y;
+            if (dx * dx + dy * dy < (2 * R) * (2 * R)) {
+              snapProjectileToGrid();
+              return;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function drawSnood(x, y, color, scale = 1) {
+    const rad = R * scale;
+    const grad = ctx.createRadialGradient(x - rad / 3, y - rad / 3, rad / 6, x, y, rad);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.25, color);
+    grad.addColorStop(1, shade(color, -0.4));
+    ctx.beginPath();
+    ctx.arc(x, y, rad, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    // little eye
+    ctx.beginPath();
+    ctx.arc(x - rad * 0.25, y - rad * 0.1, rad * 0.18, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + rad * 0.25, y - rad * 0.1, rad * 0.18, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x - rad * 0.22, y - rad * 0.08, rad * 0.08, 0, Math.PI * 2);
+    ctx.arc(x + rad * 0.28, y - rad * 0.08, rad * 0.08, 0, Math.PI * 2);
+    ctx.fillStyle = '#1a1530';
+    ctx.fill();
+  }
+
+  function shade(hex, pct) {
+    const m = hex.match(/^#([0-9a-f]{6})$/i);
+    if (!m) return hex;
+    let r = parseInt(m[1].slice(0, 2), 16);
+    let g = parseInt(m[1].slice(2, 4), 16);
+    let b = parseInt(m[1].slice(4, 6), 16);
+    r = Math.max(0, Math.min(255, Math.round(r + 255 * pct)));
+    g = Math.max(0, Math.min(255, Math.round(g + 255 * pct)));
+    b = Math.max(0, Math.min(255, Math.round(b + 255 * pct)));
+    return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // walls
+    ctx.fillStyle = '#181030';
+    ctx.fillRect(0, 0, W, 4);
+
+    // danger line
+    ctx.strokeStyle = 'rgba(255,80,80,.5)';
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, DANGER_Y);
+    ctx.lineTo(W, DANGER_Y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // grid
+    for (let r = 0; r < grid.length; r++) {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (!grid[r][c]) continue;
+        const p = cellCenter(r, c);
+        drawSnood(p.x, p.y, grid[r][c]);
+      }
+    }
+
+    // aim guide (simple line with one bounce)
+    if (!projectile && !gameOver) {
+      let x = SHOOTER_X, y = SHOOTER_Y;
+      let vx = Math.cos(aim), vy = Math.sin(aim);
+      ctx.strokeStyle = 'rgba(255,255,255,.25)';
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      let bounces = 0;
+      for (let i = 0; i < 800 && bounces < 2; i++) {
+        x += vx * 4; y += vy * 4;
+        if (x < R) { x = R; vx *= -1; bounces++; }
+        if (x > W - R) { x = W - R; vx *= -1; bounces++; }
+        if (y < R) break;
+        // stop at any filled cell
+        let hit = false;
+        for (let r = 0; r < grid.length && !hit; r++) {
+          for (let c = 0; c < grid[r].length; c++) {
+            if (!grid[r][c]) continue;
+            const p = cellCenter(r, c);
+            if ((p.x - x) ** 2 + (p.y - y) ** 2 < (2 * R) * (2 * R)) { hit = true; break; }
+          }
+        }
+        if (hit) break;
+        ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    // shooter
+    ctx.save();
+    ctx.translate(SHOOTER_X, SHOOTER_Y);
+    ctx.rotate(aim + Math.PI / 2);
+    ctx.fillStyle = '#3b3170';
+    ctx.fillRect(-6, -22, 12, 22);
+    ctx.restore();
+    drawSnood(SHOOTER_X, SHOOTER_Y, current);
+
+    // next preview
+    ctx.fillStyle = 'rgba(255,255,255,.4)';
+    ctx.font = '12px system-ui';
+    ctx.fillText('next', 12, SHOOTER_Y - 14);
+    drawSnood(40, SHOOTER_Y, next, 0.7);
+
+    // projectile
+    if (projectile) drawSnood(projectile.x, projectile.y, projectile.color);
+  }
+
+  function updateHud() {
+    document.getElementById('score').textContent = score;
+    document.getElementById('level').textContent = level;
+    let lowest = 0;
+    for (let r = grid.length - 1; r >= 0; r--) {
+      for (let c = 0; c < grid[r].length; c++) {
+        if (grid[r][c]) { lowest = cellCenter(r, c).y; break; }
+      }
+      if (lowest) break;
+    }
+    const pct = Math.max(0, Math.min(100, Math.round((lowest / DANGER_Y) * 100)));
+    document.getElementById('danger').textContent = pct + '%';
+  }
+
+  // input
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (W / rect.width);
+    const my = (e.clientY - rect.top) * (H / rect.height);
+    const a = Math.atan2(my - SHOOTER_Y, mx - SHOOTER_X);
+    aim = Math.max(-Math.PI + 0.15, Math.min(-0.15, a));
+  });
+  canvas.addEventListener('click', fire);
+  document.getElementById('newgame').addEventListener('click', startGame);
+  document.getElementById('shareBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(location.href);
+      const btn = document.getElementById('shareBtn');
+      const orig = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = orig, 1200);
+    } catch (e) {
+      alert('Share this URL: ' + location.href);
+    }
+  });
+
+  function loop() {
+    step();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  startGame();
+  loop();
+})();
+</script>
+</body>
+</html>
